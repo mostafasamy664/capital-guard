@@ -58,15 +58,12 @@ button.alt{background:#eee;color:#111}.row{display:grid;grid-template-columns:1f
 
   
 <div class="card">
-  <div class="stat"><b>اختبار WebSocket</b><span id="wsStatus" class="muted">غير متصل</span></div>
-  <div class="muted">تجربة اتصال WebSocket فعلية. السعر هنا تجريبي وليس سعر سوق حقيقي.</div>
-  <div class="row">
-    <div><label>السهم</label><input id="wsSymbol" value="COMI"></div>
-    <div><label>سعر البداية</label><input id="wsStart" type="number" step="0.01" value="200"></div>
-  </div>
-  <button onclick="startWebSocketDemo()">اتصال وبدء السعر التجريبي</button>
-  <button class="alt" onclick="stopWebSocketDemo()">إيقاف WebSocket</button>
-  <div id="wsLast" class="muted"></div>
+  <div class="stat"><b>مصدر السعر المتأخر (EODHD)</b></div>
+  <div class="muted">التوكن بيتخزن في متصفحك بس (localStorage) — مش مكتوب جوه الملف، فمتقلقش لو استضفت الملف على رابط عام.</div>
+  <div><label>API Token</label><input id="eodhdToken" type="password" placeholder="الصق التوكن هنا"></div>
+  <button onclick="saveEodhdToken()">حفظ التوكن</button>
+  <button class="alt" onclick="clearEodhdToken()">مسح التوكن</button>
+  <div id="liveSourceStatus" class="muted"></div>
 </div>
 <div id="portfolio"></div>
 </div>
@@ -470,71 +467,6 @@ function card(p){
 }
 
 
-let demoSocket=null;
-let demoTimer=null;
-let demoPrice=200;
-
-function wsStatus(text){
-  const el=document.getElementById("wsStatus");
-  if(el)el.textContent=text;
-}
-
-function startWebSocketDemo(){
-  stopWebSocketDemo();
-  const symbol=document.getElementById("wsSymbol").value.trim().toUpperCase();
-  demoPrice=Number(document.getElementById("wsStart").value);
-  demoStep=0;
-  demoStep=0;
-  if(!symbol||!Number.isFinite(demoPrice)||demoPrice<=0){
-    alert("أدخل السهم وسعر بداية صحيح.");
-    return;
-  }
-
-  // Public WebSocket echo endpoint for a connectivity test.
-  // We send simulated ticks and receive them back as WebSocket messages.
-  try{
-    demoSocket=new WebSocket("wss://ws.postman-echo.com/raw");
-  }catch(e){
-    wsStatus("خطأ في إنشاء الاتصال");
-    return;
-  }
-
-  wsStatus("جاري الاتصال...");
-
-  demoSocket.addEventListener("open",()=>{
-    wsStatus("متصل ✅");
-    sendDemoTick(symbol);
-    demoTimer=setInterval(()=>sendDemoTick(symbol),2000);
-  });
-
-  demoSocket.addEventListener("message",(event)=>{
-    try{
-      const msg=JSON.parse(event.data);
-      if(msg.type!=="price")return;
-
-      const p=state.positions[msg.symbol];
-      if(p){
-        // Feed the received WebSocket price into the exact same price-update
-        // pipeline used by the app, without opening a prompt.
-        applyLivePrice(p,msg.price);
-      }
-      const last=document.getElementById("wsLast");
-      if(last)last.textContent=msg.symbol+" — السعر المستلم من WebSocket: "+money(msg.price);
-    }catch(e){}
-  });
-
-  demoSocket.addEventListener("error",()=>{
-    wsStatus("خطأ في الاتصال ❌");
-    const last=document.getElementById("wsLast");
-    if(last)last.textContent="تعذر فتح اتصال WebSocket. تحقق من الاتصال بالإنترنت ثم أعد المحاولة.";
-  });
-
-  demoSocket.addEventListener("close",()=>{
-    wsStatus("غير متصل");
-    if(demoTimer){clearInterval(demoTimer);demoTimer=null;}
-  });
-}
-
 
 let externalQuoteTimer=null, externalQuoteBusy=false;
 
@@ -545,12 +477,28 @@ let externalQuoteTimer=null, externalQuoteBusy=false;
 // Get a free token at https://eodhd.com/register (20 calls/day free tier;
 // paid plans from $19.99/mo remove the call cap — the delay itself stays
 // 15-20 min regardless of plan).
-const EODHD_API_TOKEN="6a8249227c0f16.59760808"; // <-- your real token
+const EODHD_TOKEN_KEY="eodhd_api_token";
 const EODHD_EXCHANGE_SUFFIX=".EGX";
 
+function getEodhdToken(){
+  return localStorage.getItem(EODHD_TOKEN_KEY)||"";
+}
+function saveEodhdToken(){
+  const val=document.getElementById("eodhdToken").value.trim();
+  if(!val){ alert("اكتب التوكن الأول."); return; }
+  localStorage.setItem(EODHD_TOKEN_KEY,val);
+  document.getElementById("eodhdToken").value="";
+  setLiveSourceStatus("تم حفظ التوكن في هذا المتصفح ✅",true);
+}
+function clearEodhdToken(){
+  localStorage.removeItem(EODHD_TOKEN_KEY);
+  setLiveSourceStatus("تم مسح التوكن من هذا المتصفح");
+}
+
 function buildEodhdUrl(symbol){
+  const token=getEodhdToken();
   const ticker=String(symbol).toUpperCase()+EODHD_EXCHANGE_SUFFIX;
-  return `https://eodhd.com/api/real-time/${encodeURIComponent(ticker)}?api_token=${encodeURIComponent(EODHD_API_TOKEN)}&fmt=json`;
+  return `https://eodhd.com/api/real-time/${encodeURIComponent(ticker)}?api_token=${encodeURIComponent(token)}&fmt=json`;
 }
 
 function setLiveSourceStatus(text,ok=false){
@@ -559,6 +507,10 @@ function setLiveSourceStatus(text,ok=false){
 }
 async function fetchDelayedQuote(symbol){
   if(externalQuoteBusy)return;
+  if(!getEodhdToken()){
+    setLiveSourceStatus("محتاج تحفظ توكن EODHD الأول (تحت).");
+    return;
+  }
   externalQuoteBusy=true;
   try{
     const res=await fetch(buildEodhdUrl(symbol),{cache:"no-store",headers:{Accept:"application/json"}});
@@ -588,37 +540,6 @@ function stopDelayedExternalFeed(){
   if(externalQuoteTimer){clearInterval(externalQuoteTimer);externalQuoteTimer=null;}
 }
 
-let demoStep=0;
-
-function sendDemoTick(symbol){
-  if(!demoSocket||demoSocket.readyState!==WebSocket.OPEN)return;
-
-  /*
-    DEMO MARKET CYCLE
-    -----------------
-    25 rising ticks -> enough movement to reach the +20% TP target.
-    15 falling ticks -> enough movement to reach the trailing SL.
-    The cycle repeats after the alert is resolved/ignored.
-  */
-  demoStep++;
-  const phase=(demoStep-1)%40;
-
-  let factor;
-  if(phase<25){
-    factor=1.01;   // sustained rise: TP can be reached
-  }else{
-    factor=0.98;   // sustained fall: SL can be reached
-  }
-
-  demoPrice=Number((demoPrice*factor).toFixed(4));
-
-  demoSocket.send(JSON.stringify({
-    type:"price",
-    symbol,
-    price:demoPrice,
-    ts:Date.now()
-  }));
-}
 function applyLivePrice(p,price){
   // p is the actual position object.
   const prev=Number(p.current||price);
@@ -677,15 +598,6 @@ function applyLivePrice(p,price){
   }
 
   save();
-}
-
-function stopWebSocketDemo(){
-  if(demoTimer){clearInterval(demoTimer);demoTimer=null;}
-  if(demoSocket){
-    try{demoSocket.close();}catch(e){}
-    demoSocket=null;
-  }
-  wsStatus("غير متصل");
 }
 
 render();
