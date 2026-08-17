@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Capital Guard — Final</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#111111">
+<style>
+body{font-family:Arial,sans-serif;background:#f5f6f8;margin:0;padding:18px;color:#111}
+.wrap{max-width:760px;margin:auto}.card{background:#fff;border-radius:16px;padding:16px;margin:12px 0;box-shadow:0 2px 10px #0001}
+h1{font-size:24px;margin:4px 0 14px}.muted{color:#666;font-size:13px}
+input,button{font:inherit;padding:11px;border-radius:10px;border:1px solid #ccc;box-sizing:border-box}
+input{width:100%;margin:5px 0 8px}button{background:#111;color:#fff;border:0;cursor:pointer;margin:4px 2px}
+button.alt{background:#eee;color:#111}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee}.big{font-size:20px;font-weight:700}
+.alert{border:2px solid #e11;border-radius:12px;padding:12px;margin-top:10px}.ok{border-color:#2a8}
+.alert.danger-alert{border-color:#c62828;background:#fff5f5}
+.alert.sync-alert{border-color:#9a6700;background:#fff9ec}
+.pnl-tag{margin:8px 0;padding:6px 8px;border-radius:8px;font-size:13px;font-weight:700}
+.pnl-tag.positive{background:#eaf7ef;color:#14833b}
+.pnl-tag.negative{background:#fdecec;color:#b00020}
+.small{font-size:12px}.danger{color:#b00020}
+
+
+.group{border:1px solid #ddd;border-radius:12px;padding:10px;margin:10px 0;background:#fafafa}
+.group-title{font-weight:800;font-size:13px;margin-bottom:6px}
+.last-event{padding:8px 0;font-weight:600}
+.positive{color:#14833b}
+.negative{color:#c62828}
+
+.source-ok,.source-warn{margin:8px 0;padding:8px 10px;border-radius:10px;font-size:12px;font-weight:700}
+.source-ok{background:#eaf7ef;color:#14833b}.source-warn{background:#fff4e5;color:#9a6700}
+.external-controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛡️ Capital Guard <span class="muted">FINAL</span></h1>
+
+  <div class="card">
+    <h3>إضافة / شراء سهم</h3>
+    <div class="row">
+      <div><label>الكود</label><input id="symbol" placeholder="MBSC"></div>
+      <div><label>عدد الأسهم</label><input id="qty" type="number" step="1" min="1"></div>
+    </div>
+    <label>سعر الشراء الفعلي</label>
+    <input id="buy" type="number" step="0.0001" min="0">
+    <div class="row">
+      <div><label>TP %</label><input id="tpPct" type="number" step="0.1" min="0" value="20"></div>
+      <div><label>SL %</label><input id="slPct" type="number" step="0.1" min="0" value="8"></div>
+    </div>
+    <button onclick="saveBuy()">حفظ الشراء</button>
+    <div class="muted">السعر الحالي لا يُدخل هنا. عند الربط بالأسعار اللحظية سيأتي تلقائيًا. حاليًا نستخدم «تحديث السعر» للاختبار.</div>
+  </div>
+
+  
+<div class="card">
+  <div class="stat"><b>اختبار WebSocket</b><span id="wsStatus" class="muted">غير متصل</span></div>
+  <div class="muted">تجربة اتصال WebSocket فعلية. السعر هنا تجريبي وليس سعر سوق حقيقي.</div>
+  <div class="row">
+    <div><label>السهم</label><input id="wsSymbol" value="COMI"></div>
+    <div><label>سعر البداية</label><input id="wsStart" type="number" step="0.01" value="200"></div>
+  </div>
+  <button onclick="startWebSocketDemo()">اتصال وبدء السعر التجريبي</button>
+  <button class="alt" onclick="stopWebSocketDemo()">إيقاف WebSocket</button>
+  <div id="wsLast" class="muted"></div>
+</div>
+<div id="portfolio"></div>
+</div>
+
+<script>
+const KEY="profit_guard_v2";
+const state=JSON.parse(localStorage.getItem(KEY)||'{"positions":{}}');
+
+function money(x){return Number(x||0).toFixed(4).replace(/\.?0+$/,'');}
+function save(){localStorage.setItem(KEY,JSON.stringify(state));render();}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+/*
+  FINAL ACCOUNTING RULES
+  ----------------------
+  1) TP and SL are derived from live price, but each ratchets only in its agreed direction.
+     TP moves down on declines and stays fixed on rises; SL moves up on rises and stays fixed on declines.
+  2) Market value = current shares * live price.
+  3) Whether ANY execution (TP or SL alike) is a realized profit or a capital
+     reduction depends only on execution price vs. avgBuy — never on which
+     alert triggered it:
+       - execution price > avgBuy  -> proceeds added to realizedProfits (registered capital unchanged)
+       - execution price < avgBuy  -> proceeds subtracted from registered capital (no change to realizedProfits)
+       - execution price = avgBuy  -> no change to either
+  4) A trailing SL that still executes above avgBuy is a genuine locked-in
+     gain, so it is booked as profit — SL is only the trigger reason, not
+     the P&L outcome.
+  5) Additional purchases increase shares and registered capital by the actual
+     purchase cost, and recalculate the weighted average buy price.
+  6) TP suggested quantity is floor(gain / live price), using the position's
+     actual tpPct, with a minimum of 1 share.
+  7) SL protection is never silenced by a stale, unconfirmed TP alert: if
+     price actually falls through the stop level while a TP alert is still
+     pending, SL overrides it.
+*/
+
+function saveBuy(){
+  const symbol=document.getElementById("symbol").value.trim().toUpperCase();
+  const qty=Math.floor(Number(document.getElementById("qty").value));
+  const buy=Number(document.getElementById("buy").value);
+  const tpPct=Number(document.getElementById("tpPct").value);
+  const slPct=Number(document.getElementById("slPct").value);
+
+  if(!symbol||!Number.isFinite(qty)||qty<1||!Number.isFinite(buy)||buy<=0||
+     !Number.isFinite(tpPct)||tpPct<0||!Number.isFinite(slPct)||slPct<0){
+    alert("أدخل الكود والكمية الصحيحة وسعر الشراء الفعلي.");
+    return;
+  }
+
+  const p=state.positions[symbol];
+
+  if(!p){
+    state.positions[symbol]={
+      symbol,
+      qty,
+      avgBuy:buy,
+      capital:qty*buy,
+      realizedProfits:0,
+      current:buy,
+      previousLivePrice:buy,
+      tpPct:tpPct,
+      slPct:slPct,
+      tp:buy*(1+tpPct/100),
+      sl:buy*(1-slPct/100),
+      slAckLevel:buy*(1-slPct/100),
+      tpTrailInitialized:true,
+      pending:null,
+      lastEvent:"شراء أولي"
+    };
+  }else{
+    const addedCapital=qty*buy;
+    const oldCostBasis=p.avgBuy*p.qty;
+    const newCostBasis=oldCostBasis+addedCapital;
+    const newCapital=p.capital+addedCapital;
+    const newQty=p.qty+qty;
+
+    p.capital=newCapital;
+    p.qty=newQty;
+    // Weighted average buy price must use the cost basis of the
+    // shares currently held, not registered capital. TP/SL can change
+    // registered capital without changing the purchase cost of the
+    // remaining shares.
+    p.avgBuy=newCostBasis/newQty;
+    p.lastEvent="شراء إضافي";
+
+    // A purchase does not create a new TP/SL alert by itself.
+    // TP/SL continue to be based on the live-price cycle.
+  }
+
+  save();
+}
+
+function ackSlUpdate(symbol){
+  const p=state.positions[symbol];
+  if(!p)return;
+  p.slAckLevel=Number(p.sl);
+  p.lastEvent="تم رفع أمر Stop عند الوسيط إلى "+money(p.sl);
+  save();
+}
+
+function setPercentages(symbol){
+  const p=state.positions[symbol];
+  const a=prompt("نسبة TP %:",String(p.tpPct ?? 20));
+  if(a===null)return;
+  const b=prompt("نسبة SL %:",String(p.slPct ?? 8));
+  if(b===null)return;
+  const tp=Number(a), sl=Number(b);
+  if(!Number.isFinite(tp)||tp<0||!Number.isFinite(sl)||sl<0){
+    alert("النسب غير صحيحة."); return;
+  }
+  p.tpPct=tp; p.slPct=sl;
+  // Changing TP% intentionally starts a new stepped TP target from
+  // the current price; normal live updates do not move TP until reached.
+  p.tp=p.current*(1+tp/100);
+  p.tpTrailInitialized=true;
+  p.sl=p.current*(1-sl/100);
+  p.lastEvent="تعديل TP/SL";
+  save();
+}
+
+function updatePrice(symbol){
+  const p=state.positions[symbol];
+  const v=prompt("أدخل السعر الحالي للاختبار:");
+  if(v===null)return;
+  const price=Number(v);
+  if(!Number.isFinite(price)||price<=0){alert("السعر غير صحيح.");return;}
+  applyLivePrice(p,price);
+}
+
+function profitShares(p,referencePrice,livePrice){
+  // The increase is the value increase of the whole position from the
+  // reference price, using the position's ACTUAL tpPct (not a hardcoded 20%).
+  const tpPct=Number(p.tpPct ?? 20);
+  const increaseValue=referencePrice*(tpPct/100)*p.qty;
+  const calculated=Math.floor(increaseValue/livePrice+1e-9);
+
+  // FINAL RULE: a TP alert must never propose zero shares.
+  return Math.min(p.qty,Math.max(1,calculated));
+}
+
+function confirmTP(symbol){
+  const p=state.positions[symbol];
+  if(!p.pending||p.pending.type!=="TP")return;
+  const alertPrice=Number(p.pending.price||p.current);
+  const suggested=Math.min(p.qty,Math.max(1,Math.floor(Number(p.pending.qty))));
+  const rawQty=prompt("عدد الأسهم التي تريد بيعها في TP؟\\nالمقترح: "+suggested+" سهم\\nاضغط إلغاء لتجاهل التنبيه.",String(suggested));
+  if(rawQty===null||String(rawQty).trim()===""){
+    p.lastEvent="تجاهل TP"; p.pending=null;
+    p.tp=alertPrice*(1+(Number(p.tpPct??20)/100)); save(); return;
+  }
+  const n=Math.floor(Number(rawQty));
+  if(!Number.isFinite(n)||n<1||n>p.qty){alert("اكتب عددًا صحيحًا من 1 إلى "+p.qty+"، أو اضغط إلغاء للتجاهل.");return;}
+  const rawPrice=prompt("سعر البيع الفعلي للسهم؟\\nسعر التنبيه: "+money(alertPrice),money(alertPrice));
+  if(rawPrice===null||String(rawPrice).trim()==="")return;
+  const executionPrice=Number(rawPrice);
+  if(!Number.isFinite(executionPrice)||executionPrice<=0){alert("سعر البيع غير صحيح.");return;}
+  const saleValue=n*executionPrice, avg=Number(p.avgBuy);
+  p.qty-=n;
+  if(executionPrice>avg){
+    p.realizedProfits=Number(p.realizedProfits||0)+saleValue;
+    p.lastEvent="بيع رابح ("+n+" سهم × "+money(executionPrice)+")";
+  }else if(executionPrice<avg){
+    p.capital-=saleValue; if(Math.abs(p.capital)<1e-9)p.capital=0;
+    p.lastEvent="بيع خاسر ("+n+" سهم × "+money(executionPrice)+")";
+  }else p.lastEvent="بيع عند متوسط التكلفة ("+n+" سهم)";
+  p.pending=null;
+  p.tp=alertPrice*(1+(Number(p.tpPct??20)/100));
+  if(p.qty===0)delete state.positions[symbol];
+  save();
+}
+
+function ignoreAlert(symbol){
+  const p=state.positions[symbol];
+  if(!p.pending)return;
+
+  const type=p.pending.type;
+  const alertPrice=Number(p.pending.price||p.current);
+
+  p.lastEvent="تجاهل "+type;
+  p.pending=null;
+
+  // Ignoring a protection alert closes the current cycle.
+  // The next target/stop is calculated from the exact price
+  // at which the alert appeared, not from a later live price.
+  if(type==="TP"){
+    p.tp=alertPrice*(1+(Number(p.tpPct??20)/100));
+  }else if(type==="SL"){
+    p.sl=alertPrice*(1-(Number(p.slPct??8)/100));
+  }
+
+  // Ignore still makes no accounting change.
+  save();
+}
+
+function confirmSL(symbol){
+  const p=state.positions[symbol];
+  if(!p.pending||p.pending.type!=="SL")return;
+  const alertPrice=Number(p.pending.price||p.current), slPct=Number(p.slPct??8);
+  const rawQty=prompt("عدد الأسهم التي تريد بيعها فعليًا؟\\nالكمية الحالية: "+p.qty+"\\nاضغط إلغاء لتجاهل SL.",String(p.qty));
+  if(rawQty===null||String(rawQty).trim()===""){
+    p.lastEvent="تجاهل SL"; p.pending=null; p.sl=alertPrice*(1-slPct/100); save(); return;
+  }
+  const n=Math.floor(Number(rawQty));
+  if(!Number.isFinite(n)||n<1||n>p.qty){alert("اكتب عددًا صحيحًا من 1 إلى "+p.qty+"، أو اضغط إلغاء للتجاهل.");return;}
+  const rawPrice=prompt("سعر البيع الفعلي للسهم؟\\nسعر التنبيه: "+money(alertPrice),money(alertPrice));
+  if(rawPrice===null||String(rawPrice).trim()==="")return;
+  const executionPrice=Number(rawPrice);
+  if(!Number.isFinite(executionPrice)||executionPrice<=0){alert("سعر البيع غير صحيح.");return;}
+  const saleValue=n*executionPrice, avg=Number(p.avgBuy);
+  p.qty-=n;
+  if(executionPrice>avg){
+    p.realizedProfits=Number(p.realizedProfits||0)+saleValue;
+    p.lastEvent="بيع رابح من SL ("+n+" سهم × "+money(executionPrice)+")";
+  }else if(executionPrice<avg){
+    p.capital-=saleValue; if(Math.abs(p.capital)<1e-9)p.capital=0;
+    p.lastEvent="بيع خاسر من SL ("+n+" سهم × "+money(executionPrice)+")";
+  }else p.lastEvent="بيع عند متوسط التكلفة ("+n+" سهم)";
+  p.pending=null;
+  if(p.qty===0)delete state.positions[symbol];
+  else p.sl=alertPrice*(1-slPct/100);
+  save();
+}
+
+function clearAll(){
+  if(confirm("مسح كل البيانات؟")){
+    localStorage.removeItem(KEY);
+    location.reload();
+  }
+}
+
+function normalizePositions(){
+  Object.values(state.positions).forEach(p=>{
+    if(!Number.isFinite(Number(p.realizedProfits))) p.realizedProfits=0;
+    if(!p.tpTrailInitialized){
+      p.tp=Number(p.avgBuy)*(1+Number(p.tpPct ?? 20)/100);
+      p.tpTrailInitialized=true;
+    }
+    if(!Number.isFinite(Number(p.sl))){
+      p.sl=Number(p.current)*(1-Number(p.slPct ?? 8)/100);
+    }
+  });
+}
+
+function requestAlertPermission(){
+  if(!("Notification" in window)){
+    alert("المتصفح ده مش بيدعم تنبيهات النظام. الصوت والاهتزاز هيفضلوا شغالين لو الصفحة مفتوحة.");
+    return;
+  }
+  Notification.requestPermission().then(perm=>{
+    setLiveSourceStatus(perm==="granted" ? "تم تفعيل تنبيهات المتصفح ✅" : "تم رفض إذن التنبيهات — الصوت/الاهتزاز هيفضلوا شغالين بس", perm==="granted");
+  });
+}
+
+function playAlertBeep(){
+  try{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    const o=ctx.createOscillator(), g=ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value=880; g.gain.value=0.2;
+    o.start();
+    setTimeout(()=>{o.frequency.value=660;},150);
+    setTimeout(()=>{o.stop(); ctx.close();},350);
+  }catch(e){/* audio not available, ignore */}
+}
+
+function fireAlert(title,body){
+  playAlertBeep();
+  if(navigator.vibrate) navigator.vibrate([200,100,200]);
+  if(("Notification" in window) && Notification.permission==="granted"){
+    try{ new Notification(title,{body,tag:title}); }catch(e){/* ignore */}
+  }
+}
+
+// Fires alerts only when a position's alert-worthy state actually CHANGES,
+// not on every render/poll — otherwise every 30s price refresh would re-buzz you.
+function checkAndNotify(p){
+  const pendingKey = p.pending ? (p.pending.type+"|"+p.pending.price+"|"+p.pending.qty) : null;
+  if(pendingKey && pendingKey!==p._notifiedPendingKey){
+    p._notifiedPendingKey=pendingKey;
+    fireAlert(
+      p.pending.type==="TP" ? "🔔 TAKE PROFIT — "+p.symbol : "⚠️ STOP LOSS — "+p.symbol,
+      "السعر: "+money(p.pending.price)+" · الكمية: "+p.pending.qty
+    );
+  }
+  if(!p.pending) p._notifiedPendingKey=null;
+
+  const needsSlSync = Number(p.sl) > Number(p.slAckLevel ?? p.sl) + 1e-9;
+  const syncKey = needsSlSync ? money(p.sl) : null;
+  if(syncKey && syncKey!==p._notifiedSyncKey){
+    p._notifiedSyncKey=syncKey;
+    fireAlert("⬆️ ارفع أمر Stop — "+p.symbol, "المستوى الجديد: "+money(p.sl));
+  }
+  if(!needsSlSync) p._notifiedSyncKey=null;
+}
+
+function render(){
+  normalizePositions();
+  const box=document.getElementById("portfolio");
+  const vals=Object.values(state.positions);
+
+  vals.forEach(checkAndNotify);
+
+  box.innerHTML=
+  `<div class="card">
+    <div class="stat"><b>المحفظة</b><button class="alt" onclick="clearAll()">مسح الكل</button></div>
+    <button onclick="requestAlertPermission()">🔔 تفعيل تنبيهات المتصفح</button>
+    <div class="muted">
+      TP ثابت حتى يتحقق ولا يتحرك أثناء الدورة الحالية.
+      عند تحقق TP يبدأ هدف جديد من سعر التنبيه.
+      SL يتحرك لأعلى فقط مع صعود السعر ويثبت أثناء الهبوط،
+      وبعد تحقق التنبيه يبدأ SL جديد من سعر التنبيه.
+      تجاهل التنبيه لا يغير أي حساب.
+      عند تنفيذ البيع يتم إدخال الكمية وسعر التنفيذ الفعلي.
+      إذا كان سعر التنفيذ أعلى من متوسط الشراء تُضاف قيمة البيع كاملة إلى قيمة المبيعات الرابحة،
+      وإذا كان أقل تُخصم قيمة البيع كاملة من رأس المال المسجل.
+      الشراء الإضافي يزيد رأس المال والأسهم ويعيد حساب متوسط الشراء فقط.
+    </div>
+  </div>`+
+  (vals.length
+    ? vals.map(card).join("")
+    : `<div class="card muted">لا توجد أسهم.</div>`);
+}
+
+
+function card(p){
+  const market=p.qty*p.current;
+  const realized=Number(p.realizedProfits||0);
+  const totalValue=market+realized;
+  const marketClass=market>=Number(p.capital)?"positive":"negative";
+  const totalClass=totalValue>=Number(p.capital)?"positive":"negative";
+
+  const alert=p.pending
+    ? (()=>{
+        const avg=Number(p.avgBuy), alertPrice=Number(p.pending.price);
+        const isProfit=alertPrice>avg, isLoss=alertPrice<avg;
+        const pnlClass=isProfit?"ok":(isLoss?"danger-alert":"");
+        const pnlLabel=isProfit
+          ? `<div class="pnl-tag positive">✅ ربح متوقع لو نُفذ عند هذا السعر (فوق متوسط الشراء ${money(avg)})</div>`
+          : isLoss
+            ? `<div class="pnl-tag negative">🔻 خسارة متوقعة لو نُفذ عند هذا السعر (تحت متوسط الشراء ${money(avg)})</div>`
+            : `<div class="pnl-tag">⚪ عند متوسط التكلفة تقريبًا (${money(avg)}) — لا ربح ولا خسارة</div>`;
+        return `<div class="alert ${pnlClass}">
+        <b>${p.pending.type==="TP"?"🔔 TAKE PROFIT":"⚠️ STOP LOSS"}</b>
+        <div>سعر التنبيه: <b>${money(p.pending.price)}</b></div>
+        <div>عدد الأسهم ${p.pending.type==="TP"?"المقترح بيعها":"المتاحة للبيع"}: <b>${p.pending.qty}</b></div>
+        ${pnlLabel}
+        <button onclick="confirm${p.pending.type}('${esc(p.symbol)}')">تأكيد تنفيذ ${p.pending.type}</button>
+        <button class="alt" onclick="ignoreAlert('${esc(p.symbol)}')">تجاهل</button>
+      </div>`;
+      })()
+    : "";
+
+  const needsSlSync = Number(p.sl) > Number(p.slAckLevel ?? p.sl) + 1e-9;
+  const slSyncBanner = needsSlSync
+    ? `<div class="alert sync-alert">
+        <b>⬆️ ارفع أمر Stop عند الوسيط</b>
+        <div>مستوى SL الجديد المحسوب: <b>${money(p.sl)}</b></div>
+        <div class="muted small">آخر مستوى مُتزامن مع الوسيط: ${money(p.slAckLevel ?? p.sl)}</div>
+        <button onclick="ackSlUpdate('${esc(p.symbol)}')">تم رفعه عند الوسيط ✅</button>
+      </div>`
+    : "";
+
+  return `<div class="card">
+    <h3>${esc(p.symbol)}</h3>
+
+    <div class="group">
+      <div class="group-title">المجموعة 1 · المركز</div>
+      <div class="stat"><span>عدد الأسهم</span><b>${p.qty}</b></div>
+      <div class="stat"><span>متوسط سعر السهم</span><b>${money(p.avgBuy)}</b></div>
+      <div class="stat"><span>رأس المال المسجل</span><b>${money(p.capital)}</b></div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">المجموعة 2 · القيمة</div>
+      <div class="stat"><span>القيمة السوقية</span><b class="${marketClass}">${money(market)}</b></div>
+      <div class="stat"><span>العائد المحقق</span><b>${money(realized)}</b></div>
+      <div class="stat"><span>إجمالي القيمة</span><b class="${totalClass}">${money(totalValue)}</b></div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">المجموعة 3 · الحماية</div>
+      <div class="stat"><span>السعر اللحظي</span><b>${money(p.current)}</b></div>
+      <div class="stat"><span>TP الحالي</span><b>${money(p.tp)}</b></div>
+      <div class="stat"><span>SL الحالي</span><b>${money(p.sl)}</b></div>
+      <div class="stat"><span>آخر SL مُتزامن مع الوسيط</span><b>${money(p.slAckLevel ?? p.sl)}</b></div>
+      <div class="stat"><span>TP %</span><b>${money(p.tpPct ?? 20)}%</b></div>
+      <div class="stat"><span>SL %</span><b>${money(p.slPct ?? 8)}%</b></div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">آخر عملية</div>
+      <div class="last-event">${esc(p.lastEvent||"-")}</div>
+    </div>
+
+    <button onclick="updatePrice('${esc(p.symbol)}')">تحديث السعر</button>
+    <button class="alt" onclick="startDelayedExternalFeed('${esc(p.symbol)}',30000)">بدء السعر الخارجي (اختبار)</button>
+    <button onclick="setPercentages('${esc(p.symbol)}')">تعديل TP / SL</button>
+    ${slSyncBanner}
+    ${alert}
+  </div>`;
+}
+
+
+let demoSocket=null;
+let demoTimer=null;
+let demoPrice=200;
+
+function wsStatus(text){
+  const el=document.getElementById("wsStatus");
+  if(el)el.textContent=text;
+}
+
+function startWebSocketDemo(){
+  stopWebSocketDemo();
+  const symbol=document.getElementById("wsSymbol").value.trim().toUpperCase();
+  demoPrice=Number(document.getElementById("wsStart").value);
+  demoStep=0;
+  demoStep=0;
+  if(!symbol||!Number.isFinite(demoPrice)||demoPrice<=0){
+    alert("أدخل السهم وسعر بداية صحيح.");
+    return;
+  }
+
+  // Public WebSocket echo endpoint for a connectivity test.
+  // We send simulated ticks and receive them back as WebSocket messages.
+  try{
+    demoSocket=new WebSocket("wss://ws.postman-echo.com/raw");
+  }catch(e){
+    wsStatus("خطأ في إنشاء الاتصال");
+    return;
+  }
+
+  wsStatus("جاري الاتصال...");
+
+  demoSocket.addEventListener("open",()=>{
+    wsStatus("متصل ✅");
+    sendDemoTick(symbol);
+    demoTimer=setInterval(()=>sendDemoTick(symbol),2000);
+  });
+
+  demoSocket.addEventListener("message",(event)=>{
+    try{
+      const msg=JSON.parse(event.data);
+      if(msg.type!=="price")return;
+
+      const p=state.positions[msg.symbol];
+      if(p){
+        // Feed the received WebSocket price into the exact same price-update
+        // pipeline used by the app, without opening a prompt.
+        applyLivePrice(p,msg.price);
+      }
+      const last=document.getElementById("wsLast");
+      if(last)last.textContent=msg.symbol+" — السعر المستلم من WebSocket: "+money(msg.price);
+    }catch(e){}
+  });
+
+  demoSocket.addEventListener("error",()=>{
+    wsStatus("خطأ في الاتصال ❌");
+    const last=document.getElementById("wsLast");
+    if(last)last.textContent="تعذر فتح اتصال WebSocket. تحقق من الاتصال بالإنترنت ثم أعد المحاولة.";
+  });
+
+  demoSocket.addEventListener("close",()=>{
+    wsStatus("غير متصل");
+    if(demoTimer){clearInterval(demoTimer);demoTimer=null;}
+  });
+}
+
+
+let externalQuoteTimer=null, externalQuoteBusy=false;
+
+// EODHD "Live (Delayed)" API — https://eodhd.com/financial-apis/live-ohlcv-stocks-api
+// Delay: 15-20 minutes for EGX stocks. NOT suitable as the sole SL trigger —
+// use it only to drive the trailing-SL *reminder* banner, never as a
+// substitute for your broker's own Stop Order.
+// Get a free token at https://eodhd.com/register (20 calls/day free tier;
+// paid plans from $19.99/mo remove the call cap — the delay itself stays
+// 15-20 min regardless of plan).
+const EODHD_API_TOKEN="6a8249227c0f16.59760808"; // <-- your real token
+const EODHD_EXCHANGE_SUFFIX=".EGX";
+
+function buildEodhdUrl(symbol){
+  const ticker=String(symbol).toUpperCase()+EODHD_EXCHANGE_SUFFIX;
+  return `https://eodhd.com/api/real-time/${encodeURIComponent(ticker)}?api_token=${encodeURIComponent(EODHD_API_TOKEN)}&fmt=json`;
+}
+
+function setLiveSourceStatus(text,ok=false){
+  const el=document.getElementById("liveSourceStatus");
+  if(el){el.textContent=text;el.className=ok?"source-ok":"source-warn";}
+}
+async function fetchDelayedQuote(symbol){
+  if(externalQuoteBusy)return;
+  externalQuoteBusy=true;
+  try{
+    const res=await fetch(buildEodhdUrl(symbol),{cache:"no-store",headers:{Accept:"application/json"}});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok || data.detail) throw new Error(data.detail||("HTTP "+res.status));
+    // EODHD's field is "close" = latest delayed price. Other keys kept as
+    // fallbacks in case the source is swapped later.
+    const price=Number(data.close??data.price??data.last_price??data.lastPrice??data.regularMarketPrice??data.quote?.price??data.quote?.last_price);
+    if(!Number.isFinite(price)||price<=0) throw new Error("لم يصل سعر صالح من المصدر");
+    const key=String(symbol).toUpperCase();
+    const p=state.positions[key];
+    if(!p) throw new Error("السهم غير موجود في المحفظة");
+    applyLivePrice(p,price);
+    render();
+    const stamp=new Date().toLocaleTimeString("ar-EG",{hour12:false});
+    setLiveSourceStatus(`المصدر: EODHD (متأخر 15-20 دقيقة) · آخر تحديث ${stamp} — تذكير فقط، مش بديل عن أمر Stop عند الوسيط`,true);
+  }catch(err){
+    setLiveSourceStatus(`المصدر الخارجي غير متاح: ${err.message}`);
+  }finally{externalQuoteBusy=false;}
+}
+function startDelayedExternalFeed(symbol,intervalMs=30000){
+  stopDelayedExternalFeed();
+  fetchDelayedQuote(symbol);
+  externalQuoteTimer=setInterval(()=>fetchDelayedQuote(symbol),intervalMs);
+}
+function stopDelayedExternalFeed(){
+  if(externalQuoteTimer){clearInterval(externalQuoteTimer);externalQuoteTimer=null;}
+}
+
+let demoStep=0;
+
+function sendDemoTick(symbol){
+  if(!demoSocket||demoSocket.readyState!==WebSocket.OPEN)return;
+
+  /*
+    DEMO MARKET CYCLE
+    -----------------
+    25 rising ticks -> enough movement to reach the +20% TP target.
+    15 falling ticks -> enough movement to reach the trailing SL.
+    The cycle repeats after the alert is resolved/ignored.
+  */
+  demoStep++;
+  const phase=(demoStep-1)%40;
+
+  let factor;
+  if(phase<25){
+    factor=1.01;   // sustained rise: TP can be reached
+  }else{
+    factor=0.98;   // sustained fall: SL can be reached
+  }
+
+  demoPrice=Number((demoPrice*factor).toFixed(4));
+
+  demoSocket.send(JSON.stringify({
+    type:"price",
+    symbol,
+    price:demoPrice,
+    ts:Date.now()
+  }));
+}
+function applyLivePrice(p,price){
+  // p is the actual position object.
+  const prev=Number(p.current||price);
+  p.previousLivePrice=prev;
+  p.current=price;
+
+  const tpPct=Number(p.tpPct ?? 20);
+  const slPct=Number(p.slPct ?? 8);
+
+  // SL: moves upward with rising price, stays fixed during declines.
+  const candidateSL=price*(1-slPct/100);
+  if(!Number.isFinite(Number(p.sl))){
+    p.sl=candidateSL;
+  }else if(price>prev && candidateSL>Number(p.sl)){
+    p.sl=candidateSL;
+  }
+
+  // TP: inverse trailing behavior.
+  // It moves DOWN with falling price, and stays fixed while price rises.
+  const candidateTP=price*(1+tpPct/100);
+  if(!Number.isFinite(Number(p.tp))){
+    p.tp=candidateTP;
+  }else if(price<prev && candidateTP<Number(p.tp)){
+    p.tp=candidateTP;
+  }
+
+  // Alert only when the current price actually reaches the active target/stop.
+  if(!p.pending && price>=Number(p.tp)){
+    p.pending={
+      type:"TP",
+      price:price,
+      qty:profitShares(p, Number(p.tp)/(1+tpPct/100), price)
+    };
+    p.lastEvent="تنبيه TP";
+  }
+
+  // SL protection must never stay silenced by a stale, unconfirmed TP alert.
+  // If price actually crashes through the stop level, SL overrides it.
+  if(price<=Number(p.sl)){
+    if(!p.pending){
+      p.pending={
+        type:"SL",
+        price:price,
+        qty:p.qty
+      };
+      p.lastEvent="تنبيه SL";
+    }else if(p.pending.type==="TP"){
+      p.pending={
+        type:"SL",
+        price:price,
+        qty:p.qty
+      };
+      p.lastEvent="تنبيه SL (ألغى تنبيه TP قديم لم يتم تأكيده)";
+    }
+    // If a SL alert is already pending, keep its original trigger price/qty as-is.
+  }
+
+  save();
+}
+
+function stopWebSocketDemo(){
+  if(demoTimer){clearInterval(demoTimer);demoTimer=null;}
+  if(demoSocket){
+    try{demoSocket.close();}catch(e){}
+    demoSocket=null;
+  }
+  wsStatus("غير متصل");
+}
+
+render();
+
+if("serviceWorker" in navigator){
+  window.addEventListener("load",()=>{
+    navigator.serviceWorker.register("sw.js").catch(()=>{/* offline-cache is optional; ignore failures */});
+  });
+}
+</script>
+</body>
+</html>
