@@ -16,6 +16,7 @@ input,button{font:inherit;padding:11px;border-radius:10px;border:1px solid #ccc;
 input{width:100%;margin:5px 0 8px}button{background:#111;color:#fff;border:0;cursor:pointer;margin:4px 2px}
 button.alt{background:#eee;color:#111}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee}.big{font-size:20px;font-weight:700}
+.card-header{cursor:pointer;align-items:center}
 .alert{border:2px solid #e11;border-radius:12px;padding:12px;margin-top:10px}.ok{border-color:#2a8}
 .alert.danger-alert{border-color:#c62828;background:#fff5f5}
 .alert.sync-alert{border-color:#9a6700;background:#fff9ec}
@@ -71,6 +72,11 @@ button.alt{background:#eee;color:#111}.row{display:grid;grid-template-columns:1f
 <script>
 const KEY="profit_guard_v2";
 const state=JSON.parse(localStorage.getItem(KEY)||'{"positions":{}}');
+let expandedCards={};
+function toggleDetails(symbol){
+  expandedCards[symbol]=!expandedCards[symbol];
+  render();
+}
 
 function money(x){return Number(x||0).toFixed(4).replace(/\.?0+$/,'');}
 function save(){localStorage.setItem(KEY,JSON.stringify(state));render();}
@@ -426,9 +432,9 @@ function card(p){
       </div>`
     : "";
 
-  return `<div class="card">
-    <h3>${esc(p.symbol)}</h3>
+  const isOpen=!!expandedCards[p.symbol];
 
+  const details=`
     <div class="group">
       <div class="group-title">المجموعة 1 · المركز</div>
       <div class="stat"><span>عدد الأسهم</span><b>${p.qty}</b></div>
@@ -461,8 +467,16 @@ function card(p){
     <button onclick="updatePrice('${esc(p.symbol)}')">تحديث السعر</button>
     <button class="alt" onclick="startDelayedExternalFeed('${esc(p.symbol)}',30000)">بدء السعر الخارجي (اختبار)</button>
     <button onclick="setPercentages('${esc(p.symbol)}')">تعديل TP / SL</button>
+  `;
+
+  return `<div class="card">
+    <div class="stat card-header" onclick="toggleDetails('${esc(p.symbol)}')">
+      <h3 style="margin:0">${esc(p.symbol)}</h3>
+      <span class="muted">${isOpen?"إخفاء ▴":"التفاصيل ▾"}</span>
+    </div>
     ${slSyncBanner}
     ${alert}
+    ${isOpen?details:""}
   </div>`;
 }
 
