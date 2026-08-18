@@ -14,7 +14,7 @@ body{font-family:Arial,sans-serif;background:#f5f6f8;margin:0;padding:18px;color
 h1{font-size:24px;margin:4px 0 14px}.muted{color:#666;font-size:13px}
 input,button{font:inherit;padding:11px;border-radius:10px;border:1px solid #ccc;box-sizing:border-box}
 input{width:100%;margin:5px 0 8px}button{background:#111;color:#fff;border:0;cursor:pointer;margin:4px 2px}
-button.alt{background:#eee;color:#111}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+button.alt{background:#eee;color:#111}button.danger{background:#fff;color:#c62828;border:1.5px solid #c62828}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee}.big{font-size:20px;font-weight:700}
 .card-header{cursor:pointer;align-items:center}
 .alert{border:2px solid #e11;border-radius:12px;padding:12px;margin-top:10px}.ok{border-color:#2a8}
@@ -34,6 +34,9 @@ button.alt{background:#eee;color:#111}.row{display:grid;grid-template-columns:1f
 
 .source-ok,.source-warn{margin:8px 0;padding:8px 10px;border-radius:10px;font-size:12px;font-weight:700}
 .source-ok{background:#eaf7ef;color:#14833b}.source-warn{background:#fff4e5;color:#9a6700}
+.card-tp{border-inline-start:5px solid #14833b}
+.card-sl{border-inline-start:5px solid #c62828}
+.card-sync{border-inline-start:5px solid #9a6700}
 .external-controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 </style>
 </head>
@@ -160,6 +163,12 @@ function saveBuy(){
   }
 
   save();
+
+  document.getElementById("symbol").value="";
+  document.getElementById("qty").value="";
+  document.getElementById("buy").value="";
+  document.getElementById("tpPct").value="20";
+  document.getElementById("slPct").value="8";
 }
 
 function ackSlUpdate(symbol){
@@ -188,15 +197,6 @@ function setPercentages(symbol){
   p.sl=p.current*(1-sl/100);
   p.lastEvent="تعديل TP/SL";
   save();
-}
-
-function updatePrice(symbol){
-  const p=state.positions[symbol];
-  const v=prompt("أدخل السعر الحالي للاختبار:");
-  if(v===null)return;
-  const price=Number(v);
-  if(!Number.isFinite(price)||price<=0){alert("السعر غير صحيح.");return;}
-  applyLivePrice(p,price);
 }
 
 function profitShares(p,referencePrice,livePrice){
@@ -372,22 +372,29 @@ function render(){
 
   vals.forEach(checkAndNotify);
 
+  const totalMarket=vals.reduce((sum,p)=>sum+p.qty*p.current,0);
+  const totalRealized=vals.reduce((sum,p)=>sum+Number(p.realizedProfits||0),0);
+  const totalCapital=vals.reduce((sum,p)=>sum+Number(p.capital||0),0);
+  const totalOverall=totalMarket+totalRealized;
+  const summaryClass=totalOverall>=totalCapital?"positive":"negative";
+  const realizedClass=totalRealized>0?"positive":(totalRealized<0?"negative":"");
+
   box.innerHTML=
   `<div class="card">
-    <div class="stat"><b>المحفظة</b><button class="alt" onclick="clearAll()">مسح الكل</button></div>
+    <div class="stat"><b>المحفظة</b><button class="danger" onclick="clearAll()">مسح الكل</button></div>
     <button onclick="requestAlertPermission()">🔔 تفعيل تنبيهات المتصفح</button>
-    <div class="muted">
-      TP ثابت حتى يتحقق ولا يتحرك أثناء الدورة الحالية.
-      عند تحقق TP يبدأ هدف جديد من سعر التنبيه.
-      SL يتحرك لأعلى فقط مع صعود السعر ويثبت أثناء الهبوط،
-      وبعد تحقق التنبيه يبدأ SL جديد من سعر التنبيه.
-      تجاهل التنبيه لا يغير أي حساب.
-      عند تنفيذ البيع يتم إدخال الكمية وسعر التنفيذ الفعلي.
-      إذا كان سعر التنفيذ أعلى من متوسط الشراء تُضاف قيمة البيع كاملة إلى قيمة المبيعات الرابحة،
-      وإذا كان أقل تُخصم قيمة البيع كاملة من رأس المال المسجل.
-      الشراء الإضافي يزيد رأس المال والأسهم ويعيد حساب متوسط الشراء فقط.
-    </div>
+    <button onclick="updateAllPrices()">تحديث السعر</button>
+    <div id="globalPriceStatus" class="muted"></div>
   </div>`+
+  (vals.length
+    ? `<div class="card">
+        <div class="stat"><b>ملخص المحفظة</b></div>
+        <div class="stat"><span>رأس المال المسجل (كل الأسهم)</span><b>${money(totalCapital)}</b></div>
+        <div class="stat"><span>إجمالي القيمة السوقية</span><b class="${summaryClass}">${money(totalMarket)}</b></div>
+        <div class="stat"><span>إجمالي العائد المحقق</span><b class="${realizedClass}">${money(totalRealized)}</b></div>
+        <div class="stat"><span>الإجمالي الكلي (سوقية + محقق)</span><b class="${summaryClass}">${money(totalOverall)}</b></div>
+      </div>`
+    : "")+
   (vals.length
     ? vals.map(card).join("")
     : `<div class="card muted">لا توجد أسهم.</div>`);
@@ -464,12 +471,17 @@ function card(p){
       <div class="last-event">${esc(p.lastEvent||"-")}</div>
     </div>
 
-    <button onclick="updatePrice('${esc(p.symbol)}')">تحديث السعر</button>
-    <button class="alt" onclick="startDelayedExternalFeed('${esc(p.symbol)}',30000)">بدء السعر الخارجي (اختبار)</button>
     <button onclick="setPercentages('${esc(p.symbol)}')">تعديل TP / SL</button>
   `;
 
-  return `<div class="card">
+  let cardStateClass="";
+  if(p.pending){
+    cardStateClass=p.pending.type==="TP"?"card-tp":"card-sl";
+  }else if(needsSlSync){
+    cardStateClass="card-sync";
+  }
+
+  return `<div class="card ${cardStateClass}">
     <div class="stat card-header" onclick="toggleDetails('${esc(p.symbol)}')">
       <h3 style="margin:0">${esc(p.symbol)}</h3>
       <span class="muted">${isOpen?"إخفاء ▴":"التفاصيل ▾"}</span>
@@ -482,7 +494,7 @@ function card(p){
 
 
 
-let externalQuoteTimer=null, externalQuoteBusy=false;
+let externalQuoteBusy=false;
 
 // EODHD "Live (Delayed)" API — https://eodhd.com/financial-apis/live-ohlcv-stocks-api
 // Delay: 15-20 minutes for EGX stocks. NOT suitable as the sole SL trigger —
@@ -512,20 +524,26 @@ function clearEodhdToken(){
 function buildEodhdUrl(symbol){
   const token=getEodhdToken();
   const ticker=String(symbol).toUpperCase()+EODHD_EXCHANGE_SUFFIX;
-  return `https://eodhd.com/api/real-time/${encodeURIComponent(ticker)}?api_token=${encodeURIComponent(token)}&fmt=json`;
+  const target=`https://eodhd.com/api/real-time/${encodeURIComponent(ticker)}?api_token=${encodeURIComponent(token)}&fmt=json`;
+  // EODHD blocks direct browser (CORS) requests, so the request is routed
+  // through a free public CORS proxy (allorigins.win) that fetches the URL
+  // server-side and returns it with the right CORS headers.
+  return `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`;
 }
 
 function setLiveSourceStatus(text,ok=false){
   const el=document.getElementById("liveSourceStatus");
   if(el){el.textContent=text;el.className=ok?"source-ok":"source-warn";}
+  const el2=document.getElementById("globalPriceStatus");
+  if(el2){el2.textContent=text;el2.className=ok?"source-ok":"source-warn";}
 }
+
 async function fetchDelayedQuote(symbol){
-  if(externalQuoteBusy)return;
-  if(!getEodhdToken()){
+  const token=getEodhdToken();
+  if(!token){
     setLiveSourceStatus("محتاج تحفظ توكن EODHD الأول (تحت).");
-    return;
+    return false;
   }
-  externalQuoteBusy=true;
   try{
     const res=await fetch(buildEodhdUrl(symbol),{cache:"no-store",headers:{Accept:"application/json"}});
     const data=await res.json().catch(()=>({}));
@@ -536,22 +554,40 @@ async function fetchDelayedQuote(symbol){
     if(!Number.isFinite(price)||price<=0) throw new Error("لم يصل سعر صالح من المصدر");
     const key=String(symbol).toUpperCase();
     const p=state.positions[key];
-    if(!p) throw new Error("السهم غير موجود في المحفظة");
+    if(!p) return false;
     applyLivePrice(p,price);
-    render();
-    const stamp=new Date().toLocaleTimeString("ar-EG",{hour12:false});
-    setLiveSourceStatus(`المصدر: EODHD (متأخر 15-20 دقيقة) · آخر تحديث ${stamp} — تذكير فقط، مش بديل عن أمر Stop عند الوسيط`,true);
+    return true;
   }catch(err){
-    setLiveSourceStatus(`المصدر الخارجي غير متاح: ${err.message}`);
-  }finally{externalQuoteBusy=false;}
+    setLiveSourceStatus(`تعذر تحديث ${symbol}: ${err.message}`);
+    return false;
+  }
 }
-function startDelayedExternalFeed(symbol,intervalMs=30000){
-  stopDelayedExternalFeed();
-  fetchDelayedQuote(symbol);
-  externalQuoteTimer=setInterval(()=>fetchDelayedQuote(symbol),intervalMs);
-}
-function stopDelayedExternalFeed(){
-  if(externalQuoteTimer){clearInterval(externalQuoteTimer);externalQuoteTimer=null;}
+
+async function updateAllPrices(){
+  if(externalQuoteBusy)return;
+  const token=getEodhdToken();
+  if(!token){
+    setLiveSourceStatus("محتاج تحفظ توكن EODHD الأول (تحت).");
+    return;
+  }
+  const symbols=Object.keys(state.positions);
+  if(!symbols.length){
+    setLiveSourceStatus("لا توجد أسهم لتحديثها.");
+    return;
+  }
+  externalQuoteBusy=true;
+  setLiveSourceStatus("جاري تحديث الأسعار...");
+  let okCount=0;
+  for(const symbol of symbols){
+    const ok=await fetchDelayedQuote(symbol);
+    if(ok)okCount++;
+  }
+  render();
+  const stamp=new Date().toLocaleTimeString("ar-EG",{hour12:false});
+  if(okCount>0){
+    setLiveSourceStatus(`تم تحديث ${okCount} من ${symbols.length} سهم · آخر تحديث ${stamp} — تذكير فقط، مش بديل عن أمر Stop عند الوسيط`,true);
+  }
+  externalQuoteBusy=false;
 }
 
 function applyLivePrice(p,price){
